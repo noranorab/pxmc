@@ -1,0 +1,38 @@
+{
+  "target": "bmv2",
+  "p4info": "build/pxmc.p4.p4info.txtpb",
+  "bmv2_json": "build/pxmc.json",
+  "table_entries": [
+    {
+      "table": "MyIngress.ip_mc",
+      "match": { "hdr.ipv4.dstAddr": ["239.001.001.001", 32] },
+      "action_name": "MyIngress.set_mgid",
+      "action_params": { "mgid": 3 }
+    },
+    {
+      "table": "MyIngress.ack_unicast_lpm",
+      "match": { "hdr.ipv4.dstAddr": ["10.0.1.1", 32] },
+      "action_name": "MyIngress.set_egress",
+      "action_params": { "port": 2 }
+    },
+    {
+      "table": "MyIngress.arp_flood",
+      "match": { "hdr.ethernet.etherType": "0x0806" },
+      "action_name": "MyIngress.set_mgid",
+      "action_params": { "mgid": 999 }
+    }
+  ],
+  "multicast_group_entries": [
+    {
+      "multicast_group_id": 3,
+      "replicas": [ { "egress_port": 1, "instance": 1 } ]
+    },
+    {
+      "multicast_group_id": 999,
+      "replicas": [
+        { "egress_port": 1, "instance": 1 },
+        { "egress_port": 2, "instance": 2 }
+      ]
+    }
+  ]
+}

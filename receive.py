@@ -1,0 +1,53 @@
+# receive.py
+import argparse, socket, struct, subprocess
+
+ap = argparse.ArgumentParser()
+ap.add_argument('--group',   required=True)           # e.g. 239.1.1.1
+ap.add_argument('--iface',   required=True)           # e.g. 10.0.2.2 (this host's IP)
+ap.add_argument('--leader',  required=True)           # e.g. 10.0.1.1
+ap.add_argument('--port',    type=int, default=5000)  # RX port
+ap.add_argument('--ack_port',type=int, default=5001)  # TX port for ACKs
+ap.add_argument('--dev',     default='eth0')          # Linux ifname in Mininet
+args = ap.parse_args()
+
+def ensure_route(dst_ip: str, dev: str):
+    # Add/replace a host route so the kernel knows where to send unicast to the leader
+    try:
+        subprocess.run(
+            ['ip', 'route', 'replace', f'{dst_ip}/32', 'dev', dev],
+            check=True, capture_output=True, text=True
+        )
+        print(f"[setup] route {dst_ip}/32 via {dev} ok")
+    except Exception as e:
+        print(f"[setup] WARNING: couldn't add route to {dst_ip}/32 via {dev}: {e}")
+
+# 1) Ensure unicast to leader works (prevents: OSError 101 Network is unreachable)
+#ensure_route(args.leader, args.dev)
+
+# 2) RX: UDP socket, join multicast on the correct interface
+rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+rx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+rx.bind(('', args.port))
+
+mreq = struct.pack('=4s4s',
+                   socket.inet_aton(args.group),
+                   socket.inet_aton(args.iface))
+rx.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+
+print(f"[replica {args.iface}] joined {args.group}:{args.port}, ACKs -> {args.leader}:{args.ack_port}")
+
+# 3) TX: UDP socket for ACKs; bind to iface IP so source is correct
+tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+tx.bind((args.iface, 0))  # choose ephemeral port, but force source IP
+
+while True:
+    data, addr = rx.recvfrom(65535)
+    print(f"[rx {args.iface}] got {len(data)} B from {addr}: {data!r}")
+
+    # Build a tiny ACK payload (echo length + a tag); customize as you like
+    ack = b'ACK:' + data[:16]
+    try:
+        tx.sendto(ack, (args.leader, args.ack_port))
+        print(f"[replica {args.iface}] sent ACK -> {args.leader}:{args.ack_port}")
+    except OSError as e:
+        print(f"[replica {args.iface}] ACK send failed: {e}")

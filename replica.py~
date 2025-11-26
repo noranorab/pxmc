@@ -1,0 +1,46 @@
+# replica.py
+import argparse, socket, struct
+
+def strip_ipv4(pkt: bytes) -> bytes:
+    if len(pkt) >= 20 and (pkt[0] >> 4) == 4:
+        ihl = (pkt[0] & 0x0F) * 4
+        return pkt[ihl:]
+    return pkt
+
+ap = argparse.ArgumentParser()
+ap.add_argument('--group',  required=True)         # e.g. 239.1.1.1
+ap.add_argument('--iface',  required=True)         # host's unicast IP (e.g. 10.0.2.2)
+ap.add_argument('--leader', required=True)         # leader's unicast IP (e.g. 10.0.1.1)
+ap.add_argument('--proto',  type=int, default=253)
+args = ap.parse_args()
+
+print(f"[replica {args.iface}] joined {args.group}, proto={args.proto}, waiting for REQ…", flush=True)
+
+# RX: raw IP socket on protocol
+rx = socket.socket(socket.AF_INET, socket.SOCK_RAW, args.proto)
+rx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+# Bind to group can help some kernels deliver only matching dst
+try:
+    rx.bind((args.group, 0))
+except OSError:
+    pass  # not mandatory everywhere
+
+# Join multicast on the *correct interface* (use iface IP here)
+mreq = struct.pack('=4s4s', socket.inet_aton(args.group), socket.inet_aton(args.iface))
+rx.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+
+# TX for ACKs
+tx = socket.socket(socket.AF_INET, socket.SOCK_RAW, args.proto)
+
+while True:
+    pkt, src = rx.recvfrom(4096)
+    payload = strip_ipv4(pkt)
+    if len(payload) >= 8:
+        grp_be, seq, mtype = struct.unpack('!IHB', payload[:7])
+        if mtype == 0:  # REQ
+            print(f"[replica {args.iface}] got REQ seq={seq} from {src[0]}", flush=True)
+            # ACK with same group + seq, type = 1
+            ack = struct.pack('!IHBx', grp_be, seq, 1)
+            tx.sendto(ack, (args.leader, 0))
+            print(f"[replica {args.iface}] sent ACK seq={seq} -> {args.leader}", flush=True)

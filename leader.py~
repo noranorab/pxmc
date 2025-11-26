@@ -1,0 +1,84 @@
+# leader.py (robust raw-IP multicast sender + ACK counter; no bind on RX)
+import argparse, socket, struct, time
+
+def strip_ipv4(pkt: bytes) -> bytes:
+    if len(pkt) >= 20 and (pkt[0] >> 4) == 4:
+        ihl = (pkt[0] & 0x0F) * 4
+        if ihl >= 20 and ihl <= len(pkt):
+            return pkt[ihl:]
+    return pkt
+
+def hexdump(b: bytes, n=16):
+    return ' '.join(f'{x:02x}' for x in b[:n])
+
+ap = argparse.ArgumentParser()
+ap.add_argument('--group',   required=True)              # e.g. 239.1.1.1
+ap.add_argument('--iface',   required=True)              # e.g. 10.0.1.1 (egress)
+ap.add_argument('--proto',   type=int, default=253)      # PX IP protocol
+ap.add_argument('--seq',     type=int, required=True)    # sequence
+ap.add_argument('--expect',  type=int, default=1)        # expected ACKs
+ap.add_argument('--timeout', type=float, default=5.0)    # seconds
+ap.add_argument('--ttl',     type=int, default=4)        # multicast TTL
+ap.add_argument('--resend',  type=float, default=0.0)    # resend interval (0=none)
+args = ap.parse_args()
+
+# Build PX REQ payload: group_ip(4) | seq(2) | type(1=REQ) | pad(1)
+grp_ip_be = struct.unpack('!I', socket.inet_aton(args.group))[0]
+px_req = struct.pack('!IHBx', grp_ip_be, args.seq, 0)
+
+# TX raw IP socket (kernel builds the IPv4 header with proto=args.proto)
+tx = socket.socket(socket.AF_INET, socket.SOCK_RAW, args.proto)
+tx.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(args.iface))
+tx.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, args.ttl)
+tx.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
+
+# RX raw IP socket (NO BIND) – receive all proto=253 destined to this host
+rx = socket.socket(socket.AF_INET, socket.SOCK_RAW, args.proto)
+rx.settimeout(0.25)
+
+# Send initial REQ
+tx.sendto(px_req, (args.group, 0))
+print(f"[leader] sent REQ seq={args.seq} proto={args.proto} to {args.group} from {args.iface}", flush=True)
+
+got, seen = 0, set()
+t0 = time.time()
+last_send = t0
+
+while got < args.expect and (time.time() - t0) < args.timeout:
+    if args.resend > 0 and (time.time() - last_send) >= args.resend:
+        tx.sendto(px_req, (args.group, 0))
+        last_send = time.time()
+        print(f"[leader] re-sent REQ seq={args.seq}", flush=True)
+
+    try:
+        pkt, src = rx.recvfrom(4096)
+    except socket.timeout:
+        continue
+
+    payload = strip_ipv4(pkt)
+    if len(payload) < 8:
+        # Debug: show why we skipped
+        print(f"[leader] rx short payload {len(payload)} from {src[0]} first-bytes={hexdump(payload)}", flush=True)
+        continue
+
+    g_be, seq, mtype = struct.unpack('!IHB', payload[:7])
+
+    if mtype != 1:
+        # Not an ACK (likely our own REQ echo if loop is on)
+        # print(f"[leader] rx non-ACK type={mtype} from {src[0]}")
+        continue
+    if seq != args.seq:
+        # print(f"[leader] rx other-seq {seq} from {src[0]}")
+        continue
+    if g_be != grp_ip_be:
+        # print(f"[leader] rx other-group from {src[0]}")
+        continue
+
+    s = src[0]
+    if s in seen:
+        continue
+    seen.add(s)
+    got += 1
+    print(f"[leader] ACK {got}/{args.expect} from {s} (seq={seq})", flush=True)
+
+print(f"[leader] done: {got} ACK(s) in {time.time()-t0:.2f}s", flush=True)

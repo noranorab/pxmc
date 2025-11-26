@@ -1,0 +1,37 @@
+import argparse, socket, struct, time
+
+ap = argparse.ArgumentParser()
+ap.add_argument('--group',   required=True)           # e.g. 239.1.1.1
+ap.add_argument('--iface',   required=True)           # e.g. 10.0.1.1 (egress)
+ap.add_argument('--port',    type=int, default=5000)  # multicast port
+ap.add_argument('--ack_port',type=int, default=5001)  # local port to receive ACKs
+ap.add_argument('--msg',     default='hello-replicas')
+ap.add_argument('--ttl',     type=int, default=4)
+ap.add_argument('--timeout', type=float, default=5.0) # how long to listen for ACKs
+args = ap.parse_args()
+
+# TX: multicast sender
+tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+tx.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(args.iface))
+tx.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, args.ttl)
+
+# RX: ACK listener
+rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+rx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+rx.bind(('', args.ack_port))
+rx.settimeout(0.25)
+
+# Send one multicast message
+tx.sendto(args.msg.encode(), (args.group, args.port))
+print(f"[leader {args.iface}] sent {args.msg!r} to {args.group}:{args.port}")
+
+# Just print ACKs as they arrive until timeout expires
+t0 = time.time()
+while (time.time() - t0) < args.timeout:
+    try:
+        data, addr = rx.recvfrom(65535)
+    except socket.timeout:
+        continue
+    print(f"[leader] ACK from {addr}: {data!r}")
+
+print("[leader] done listening.")
