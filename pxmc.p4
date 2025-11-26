@@ -12,11 +12,12 @@ typedef bit<32> ip4Addr_t;
 
 const bit<16> ETHERTYPE_IPV4 = 0x0800;
 const bit<16> ETHERTYPE_ARP  = 0x0806;
-const bit<8>  IP_PROTO_PX    = 253;
+//const bit<8>  IP_PROTO_PX    = 253;
 
 const ip4Addr_t LEADER_IP = 0x0a000101;   // 10.0.1.1
 const bit<16>   ACK_PORT  = 5001;         // UDP dst port for ACKs
-
+const bit<32> EXPECTED_ACKS = 3;
+const bit<16> NOTIFY_PORT = 6000;
 /*************************************************************************
  * Headers
  *************************************************************************/
@@ -42,10 +43,10 @@ header ipv4_t {
 }
 
 header px_t {
-    ip4Addr_t group_ip;   
+    //ip4Addr_t group_ip;   
     bit<16>   seq;
-    bit<8>    msg_type;   // 0 = REQ, 1 = ACK
-    bit<8>    _pad;
+    //bit<8>    msg_type;   // 0 = REQ, 1 = ACK
+    //bit<8>    _pad;
 }
 
 header udp_t {
@@ -62,7 +63,9 @@ struct headers {
     px_t       px;
 }
 
-struct metadata { }
+struct metadata {
+    bit<1> notify_leader;
+}
 
 /*************************************************************************
  * Parser
@@ -85,14 +88,18 @@ parser MyParser(packet_in packet,
         packet.extract(hdr.ipv4);
         transition select(hdr.ipv4.protocol) {
             17         : parse_udp;  // UDP
-            IP_PROTO_PX: parse_px;   // custom PX (optional)
+            //IP_PROTO_PX: parse_px;   // custom PX (optional)
             default    : accept;
         }
     }
-
+    
     state parse_udp {
         packet.extract(hdr.udp);
-        transition accept;
+        
+        transition select(hdr.udp.dstPort) {
+            ACK_PORT: parse_px;    // ACK vers port 5001 => on attend un header PX
+            default:  accept;      // sinon, pas de PX
+        }
     }
 
     state parse_px {
@@ -116,13 +123,14 @@ control MyIngress(inout headers hdr,
 
     // 32-bit register with 1 cell to count ACKs
     register<bit<32>>(1) ack_total;
-
-    action inc_ack_total() {
-        bit<32> v;
-        ack_total.read(v, 0);
-        v = v + 1;
-        ack_total.write(0, v);
-    }
+    register<bit<16>>(1) last_seq;
+    
+//    action inc_ack_total() {
+ //       bit<32> v;
+   //     ack_total.read(v, 0);
+     //   v = v + 1;
+       // ack_total.write(0, v);
+    //}
 
     action set_mgid(bit<16> mgid) {
         stdmeta.mcast_grp = mgid;     // multicast replication group
@@ -175,10 +183,38 @@ control MyIngress(inout headers hdr,
                 ack_unicast_lpm.apply();
 
                 // Count UDP ACKs to leader
-                if (hdr.udp.isValid() &&
+                if (hdr.udp.isValid() && hdr.px.isValid() &&
                     hdr.ipv4.dstAddr == LEADER_IP &&
                     hdr.udp.dstPort == ACK_PORT) {
-                    inc_ack_total();
+
+		    bit<16> old_seq;
+
+		    bit<32> count;
+
+            	    last_seq.read(old_seq, 0);
+            	    ack_total.read(count, 0);
+
+            	    if (hdr.px.seq > old_seq) {
+		       // nouveau round
+		       old_seq = hdr.px.seq;
+		       count   = 0;              
+		    }
+		    if (hdr.px.seq == old_seq) {
+		      // même round
+		       count = count + 1;
+		    } 
+		   
+		    last_seq.write(0, old_seq);
+    		    ack_total.write(0, count);
+
+    		    // Seuil atteint → marquer pour le leader
+       	  	    if (count == EXPECTED_ACKS) {
+              	 	meta.notify_leader = 1;
+			hdr.udp.dstPort = NOTIFY_PORT;
+
+			//count = 0;
+			//ack_total.write(0, count);
+    		    }
                 }
             }
         }
