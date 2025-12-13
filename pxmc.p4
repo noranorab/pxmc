@@ -20,6 +20,8 @@ const bit<16>   ACK_PORT  = 5001;         // UDP dst port for ACKs
 const bit<16>   REQ_PORT  = 5000;
 //const bit<32> EXPECTED_ACKS = 3;
 
+const bit<32> MAX_GROUPS = 256;
+
 //const bit<16> NOTIFY_PORT = 6000;
 /*************************************************************************
  * Headers
@@ -46,7 +48,7 @@ header ipv4_t {
 }
 
 header px_t {
-    //ip4Addr_t group_ip;   
+    ip4Addr_t group_ip;   
     bit<16>   seq;
     //bit<8>    msg_type;   // 0 = REQ, 1 = ACK
     //bit<8>    _pad;
@@ -67,7 +69,7 @@ struct headers {
 }
 
 struct metadata {
-    bit<1> notify_leader;
+    bit<8> gid;
 }
 
 /*************************************************************************
@@ -126,10 +128,14 @@ control MyIngress(inout headers hdr,
                   inout standard_metadata_t stdmeta) {
 
   
-    register<ip4Addr_t>(1) last_leader;
-    register<bit<32>>(1) ack_total;
-    register<bit<16>>(1) last_seq;
-    
+    //register<ip4Addr_t>(1) last_leader;
+    //register<bit<32>>(1) ack_total;
+    //register<bit<16>>(1) last_seq;
+
+    register<ip4Addr_t>(MAX_GROUPS) leader_ip;
+    register<bit<16>>(MAX_GROUPS) leader_seq;
+    register<port_t>(MAX_GROUPS) leader_port;
+    register<bit<32>>(MAX_GROUPS) ack_cnt;
 
     action set_mgid(bit<16> mgid) {
         stdmeta.mcast_grp = mgid;     // multicast replication group
@@ -137,6 +143,10 @@ control MyIngress(inout headers hdr,
 
     action set_egress(egressSpec_t port) {
         stdmeta.egress_spec = port;   // unicast output port
+    }
+
+    action set_git(bit<8> git){
+    	meta.gid = git;
     }
 
     // ARP flood
@@ -170,69 +180,85 @@ control MyIngress(inout headers hdr,
     }
 
        apply {
+
+        
         // ARP
         if (hdr.ethernet.isValid() && hdr.ethernet.etherType == ETHERTYPE_ARP) {
             arp_flood.apply();
         }
 
         // IPv4 path
-        if (hdr.ipv4.isValid()) {
+        if (hdr.ipv4.isValid() && hdr.udp.isValid() && hdr.px.isValid()) {
 
             // ---------- REQ multicast : élection + forwarding ----------
-            if (hdr.udp.isValid() &&
-                hdr.udp.dstPort == REQ_PORT &&
-                hdr.px.isValid() &&
-                hdr.ipv4.dstAddr == GROUP_IP) {
+            if (hdr.udp.dstPort == REQ_PORT) {
+	        
+ 	        
+	        bit<32> idx = (bit<32>) hdr.px.group_ip[7:0];
 
-                ip4Addr_t cur_leader;
-                bit<16>   cur_seq;
-                bit<32>   cur_cnt;
+		ip4Addr_t cur_leader;
+		bit<16> cur_seq;
+		port_t cur_port;
+		bit<32> cur_cnt;
 
-                last_leader.read(cur_leader, 0);
-                last_seq.read(cur_seq, 0);
-                ack_total.read(cur_cnt, 0);
+		leader_ip.read(cur_leader, idx);
+		leader_seq.read(cur_seq, idx);
+		leader_port.read(cur_port, idx);
+		ack_cnt.read(cur_cnt, idx);
 
                 ip4Addr_t new_leader = hdr.ipv4.srcAddr;
                 bit<16>   new_seq    = hdr.px.seq;
 
-                if ((new_seq > cur_seq) ||
-                    (new_seq == cur_seq && new_leader != cur_leader)) {
+                if (new_seq > cur_seq || new_leader != cur_leader) {
 
                     cur_seq    = new_seq;
                     cur_leader = new_leader;
                     cur_cnt    = 0;
 
-                    last_seq.write(0, cur_seq);
-                    last_leader.write(0, cur_leader);
-                    ack_total.write(0, cur_cnt);
                 }
+		if(new_seq == cur_seq && new_leader == cur_leader){
+	            cur_port = (port_t) stdmeta.ingress_port;
+		}
+			
+		//last_seq.write(0, cur_seq);
+                //last_leader.write(0, cur_leader);
+                //ack_total.write(0, cur_cnt);
 
-                // Forward du REQ en multicast
-                ip_mc.apply();
+		leader_seq.write(idx, cur_seq);
+                leader_ip.write(idx,  cur_leader);
+                leader_port.write(idx,cur_port);
+                ack_cnt.write(idx,    cur_cnt);
+
+		ip_mc.apply();
             }
 
             // ----------  Tout le reste (ACK + autre unicast IPv4) ----------
             else {
                 
-                ack_unicast_lpm.apply();
+                //ack_unicast_lpm.apply();
 
-                if (hdr.udp.isValid() &&
-                    hdr.udp.dstPort == ACK_PORT &&
-                    hdr.px.isValid()) {
+                if (hdr.udp.dstPort == ACK_PORT) {
 
-                    ip4Addr_t cur_leader;
+		    bit<32> idx = (bit<32>)hdr.px.group_ip[7:0];
+
+		    ip4Addr_t cur_leader;
                     bit<16>   cur_seq;
                     bit<32>   cur_cnt;
-
-                    last_leader.read(cur_leader, 0);
-                    last_seq.read(cur_seq, 0);
-                    ack_total.read(cur_cnt, 0);
+		    egressSpec_t cur_port;
+		    
+                    leader_ip.read(cur_leader, idx);
+                    leader_seq.read(cur_seq, idx);
+		    leader_port.read(cur_port, idx);
+		    ack_cnt.read(cur_cnt, idx);
 
                     if (hdr.ipv4.dstAddr == cur_leader &&
                         hdr.px.seq == cur_seq) {
-                        // ACK du (leader,seq) actif → on compte
+
+			// ACK du (leader,seq) actif → on compte
                         cur_cnt = cur_cnt + 1;
-                        ack_total.write(0, cur_cnt);
+			ack_cnt.write(idx, cur_cnt);
+
+			stdmeta.egress_spec = cur_port;
                     } else {
                         // ACK d un ancien leader ou ancien round: on DROP
                         stdmeta.egress_spec = 0;
