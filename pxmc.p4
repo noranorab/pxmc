@@ -15,9 +15,12 @@ const bit<16> ETHERTYPE_ARP  = 0x0806;
 //const bit<8>  IP_PROTO_PX    = 253;
 
 const ip4Addr_t LEADER_IP = 0x0a000101;   // 10.0.1.1
+const ip4Addr_t GROUP_IP = 0xEF010101;
 const bit<16>   ACK_PORT  = 5001;         // UDP dst port for ACKs
-const bit<32> EXPECTED_ACKS = 3;
-const bit<16> NOTIFY_PORT = 6000;
+const bit<16>   REQ_PORT  = 5000;
+//const bit<32> EXPECTED_ACKS = 3;
+
+//const bit<16> NOTIFY_PORT = 6000;
 /*************************************************************************
  * Headers
  *************************************************************************/
@@ -97,6 +100,7 @@ parser MyParser(packet_in packet,
         packet.extract(hdr.udp);
         
         transition select(hdr.udp.dstPort) {
+	    REQ_PORT: parse_px;
             ACK_PORT: parse_px;    // ACK vers port 5001 => on attend un header PX
             default:  accept;      // sinon, pas de PX
         }
@@ -121,16 +125,11 @@ control MyIngress(inout headers hdr,
                   inout metadata meta,
                   inout standard_metadata_t stdmeta) {
 
-    // 32-bit register with 1 cell to count ACKs
+  
+    register<ip4Addr_t>(1) last_leader;
     register<bit<32>>(1) ack_total;
     register<bit<16>>(1) last_seq;
     
-//    action inc_ack_total() {
- //       bit<32> v;
-   //     ack_total.read(v, 0);
-     //   v = v + 1;
-       // ack_total.write(0, v);
-    //}
 
     action set_mgid(bit<16> mgid) {
         stdmeta.mcast_grp = mgid;     // multicast replication group
@@ -170,61 +169,83 @@ control MyIngress(inout headers hdr,
         default_action = NoAction();  // permissive: do nothing if no rule
     }
 
-    apply {
-        // ARP allow flooding
+       apply {
+        // ARP
         if (hdr.ethernet.isValid() && hdr.ethernet.etherType == ETHERTYPE_ARP) {
             arp_flood.apply();
         }
 
         // IPv4 path
         if (hdr.ipv4.isValid()) {
-            // Try multicast; if no hit, try unicast
-            if (!ip_mc.apply().hit) {
+
+            // ---------- REQ multicast : élection + forwarding ----------
+            if (hdr.udp.isValid() &&
+                hdr.udp.dstPort == REQ_PORT &&
+                hdr.px.isValid() &&
+                hdr.ipv4.dstAddr == GROUP_IP) {
+
+                ip4Addr_t cur_leader;
+                bit<16>   cur_seq;
+                bit<32>   cur_cnt;
+
+                last_leader.read(cur_leader, 0);
+                last_seq.read(cur_seq, 0);
+                ack_total.read(cur_cnt, 0);
+
+                ip4Addr_t new_leader = hdr.ipv4.srcAddr;
+                bit<16>   new_seq    = hdr.px.seq;
+
+                if ((new_seq > cur_seq) ||
+                    (new_seq == cur_seq && new_leader != cur_leader)) {
+
+                    cur_seq    = new_seq;
+                    cur_leader = new_leader;
+                    cur_cnt    = 0;
+
+                    last_seq.write(0, cur_seq);
+                    last_leader.write(0, cur_leader);
+                    ack_total.write(0, cur_cnt);
+                }
+
+                // Forward du REQ en multicast
+                ip_mc.apply();
+            }
+
+            // ----------  Tout le reste (ACK + autre unicast IPv4) ----------
+            else {
+                
                 ack_unicast_lpm.apply();
 
-                // Count UDP ACKs to leader
-                if (hdr.udp.isValid() && hdr.px.isValid() &&
-                    hdr.ipv4.dstAddr == LEADER_IP &&
-                    hdr.udp.dstPort == ACK_PORT) {
+                if (hdr.udp.isValid() &&
+                    hdr.udp.dstPort == ACK_PORT &&
+                    hdr.px.isValid()) {
 
-		    bit<16> old_seq;
+                    ip4Addr_t cur_leader;
+                    bit<16>   cur_seq;
+                    bit<32>   cur_cnt;
 
-		    bit<32> count;
+                    last_leader.read(cur_leader, 0);
+                    last_seq.read(cur_seq, 0);
+                    ack_total.read(cur_cnt, 0);
 
-            	    last_seq.read(old_seq, 0);
-            	    ack_total.read(count, 0);
-
-            	    if (hdr.px.seq > old_seq) {
-		       // nouveau round
-		       old_seq = hdr.px.seq;
-		       count   = 0;              
-		    }
-		    if (hdr.px.seq == old_seq) {
-		      // même round
-		       count = count + 1;
-		    } 
-		   
-		    last_seq.write(0, old_seq);
-    		    ack_total.write(0, count);
-
-    		    // Seuil atteint → marquer pour le leader
-       	  	    if (count == EXPECTED_ACKS) {
-              	 	meta.notify_leader = 1;
-			hdr.udp.dstPort = NOTIFY_PORT;
-
-			//count = 0;
-			//ack_total.write(0, count);
-    		    }
+                    if (hdr.ipv4.dstAddr == cur_leader &&
+                        hdr.px.seq == cur_seq) {
+                        // ACK du (leader,seq) actif → on compte
+                        cur_cnt = cur_cnt + 1;
+                        ack_total.write(0, cur_cnt);
+                    } else {
+                        // ACK d un ancien leader ou ancien round: on DROP
+                        stdmeta.egress_spec = 0;
+                        stdmeta.mcast_grp   = 0;
+                    }
                 }
+                // sinon : autre trafic unicast IPv4 : juste forwarding normal
             }
-        }
-
-        // Reflection
-        if (stdmeta.mcast_grp == 0 && stdmeta.egress_spec == 0) {
-            stdmeta.egress_spec = stdmeta.ingress_port;
-        }
-    }
+	  }
+	 }
 }
+	    
+
 
 /*************************************************************************
  * Egress 
@@ -258,3 +279,6 @@ V1Switch(
     MyComputeChecksum(),
     MyDeparser()
 ) main;
+
+
+
