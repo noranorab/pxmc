@@ -1,0 +1,16 @@
+import socket
+import struct
+
+FLOOD_PORT = 5003
+DST_IP = "10.0.1.2"   # n'importe quel host connecté au switch
+GROUP_IP = "239.0.0.1"
+SEQ = 1
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+group_raw = struct.unpack("!I", socket.inet_aton(GROUP_IP))[0]
+pkt = struct.pack("!IH", group_raw, SEQ)
+
+print("Sending FLOOD")
+sock.sendto(pkt, (DST_IP, FLOOD_PORT))
+print("Done")

@@ -1,0 +1,31 @@
+import socket
+import struct
+import ipaddress
+import json
+import time
+
+REQ_PORT = 5000
+PX_GROUP = "239.1.1.1"
+
+def px_pack(group_ip: str, seq: int) -> bytes:
+    ip_int = int(ipaddress.IPv4Address(group_ip))
+    return struct.pack("!IH", ip_int, seq & 0xFFFF)
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind(("10.0.1.1", 40000))   # h1 source IP
+
+seq = 1
+
+msg = {
+    "t": "WRITE",
+    "from": 1,
+    "req_id": "test-req-1",
+    "key": "hello",
+    "val": {"x": 123}
+}
+
+payload = px_pack(PX_GROUP, seq) + json.dumps(msg).encode()
+
+print("[sender] sending packet")
+sock.sendto(payload, ("10.0.1.2", REQ_PORT))  # send to ONE host
+print("[sender] done")

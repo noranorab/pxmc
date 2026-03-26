@@ -4,36 +4,6 @@
   "bmv2_json": "build/pxmc.json",
   "table_entries": [
     {
-      "table": "MyIngress.ip_mc",
-      "match": { "hdr.ipv4.dstAddr": ["239.001.001.001", 32] },
-      "action_name": "MyIngress.set_mgid",
-      "action_params": { "mgid": 4 }
-    },
-    {
-      "table": "MyIngress.ack_unicast_lpm",
-      "match": { "hdr.ipv4.dstAddr": ["10.0.1.1", 32] },
-      "action_name": "MyIngress.set_egress",
-      "action_params": { "port": 2 }
-    },
-    {
-      "table": "MyIngress.ack_unicast_lpm",
-      "match": { "hdr.ipv4.dstAddr": ["10.0.1.3", 32] },
-      "action_name": "MyIngress.set_egress",
-      "action_params": { "port": 2 }
-    },
-    {
-      "table": "MyIngress.ack_unicast_lpm",
-      "match": { "hdr.ipv4.dstAddr": ["10.0.1.2", 32] },
-      "action_name": "MyIngress.set_egress",
-      "action_params": { "port": 2 }
-    },
-    {
-      "table": "MyIngress.ack_unicast_lpm",
-      "match": { "hdr.ipv4.dstAddr": ["10.0.1.4", 32] },
-      "action_name": "MyIngress.set_egress",
-      "action_params": { "port": 1 }
-    },
-    {
       "table": "MyIngress.arp_flood",
       "match": { "hdr.ethernet.etherType": 2054 },
       "action_name": "MyIngress.set_mgid",
@@ -41,10 +11,6 @@
     }
   ],
   "multicast_group_entries": [
-    {
-      "multicast_group_id": 4,
-      "replicas": [ { "egress_port": 1, "instance": 1 } ]
-    },
     {
       "multicast_group_id": 999,
       "replicas": [

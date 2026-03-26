@@ -1,0 +1,70 @@
+import asyncio, json, struct, ipaddress, argparse
+from typing import Dict, Tuple, Optional
+
+REQ_PORT = 5000
+PX_GROUP = "239.1.1.1"
+
+def px_pack(group_ip_str: str, seq: int) -> bytes:
+    group_ip = int(ipaddress.IPv4Address(group_ip_str))
+    return struct.pack("!IH", group_ip, seq & 0xFFFF)
+
+def px_unpack(buf: bytes):
+    if len(buf) < 6:
+        raise ValueError("payload too short for px")
+    group_ip_int, seq = struct.unpack("!IH", buf[:6])
+    rest = buf[6:]
+    return str(ipaddress.IPv4Address(group_ip_int)), seq, rest
+
+class Replica(asyncio.DatagramProtocol):
+    def __init__(self, rid: int):
+        self.id = rid
+        self.transport: Optional[asyncio.DatagramTransport] = None
+        self.kv: Dict[str, str] = {}
+        self.seq = 0
+
+    def sendto(self, addr, msg: dict):
+        self.seq = (self.seq + 1) & 0xFFFF
+        payload = px_pack(PX_GROUP, self.seq) + json.dumps(msg).encode()
+        self.transport.sendto(payload, addr)
+
+    def datagram_received(self, data, addr):
+        try:
+            _, _, rest = px_unpack(data)
+            msg = json.loads(rest.decode())
+        except Exception:
+            return
+
+        t = msg.get("t")
+        req_id = msg.get("req_id")
+
+        if t == "WRITE":
+            key = msg.get("key")
+            val = msg.get("val")
+            self.kv[str(key)] = json.dumps(val)
+            self.sendto(addr, {"t":"OK", "from": self.id, "req_id": req_id})
+
+        elif t == "READ":
+            key = str(msg.get("key"))
+            val = self.kv.get(key, None)
+            # return original type if possible
+            out = json.loads(val) if val is not None else None
+            self.sendto(addr, {"t":"OK", "from": self.id, "req_id": req_id, "val": out})
+
+        else:
+            self.sendto(addr, {"t":"FAIL", "from": self.id, "req_id": req_id, "reason":"bad_type"})
+
+async def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--id", type=int, required=True)
+    ap.add_argument("--ip", required=True)  # local host IP 10.0.0.X
+    args = ap.parse_args()
+
+    loop = asyncio.get_running_loop()
+    proto = Replica(args.id)
+    transport, _ = await loop.create_datagram_endpoint(lambda: proto, local_addr=(args.ip, REQ_PORT))
+    proto.transport = transport
+    print(f"[replica {args.id}] listening on {args.ip}:{REQ_PORT}")
+    await asyncio.Future()
+
+if __name__ == "__main__":
+    asyncio.run(main())
